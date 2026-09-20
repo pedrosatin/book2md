@@ -1,20 +1,71 @@
 # book2md
 
-`book2md` turns DRM-free ebooks into local Markdown files. It handles EPUB directly, reads PDFs that contain selectable text, and converts MOBI through Calibre.
-
-## Install
+Turn a DRM-free ebook into local Markdown files.
 
 ```bash
-python -m pip install .
+book2md ~/books/book.epub -o ~/notes/book
 ```
 
-During development:
+```text
+Converted book.epub to /home/you/notes/book
+```
+
+EPUB output keeps the book's reading order, local images, and internal links:
+
+```text
+book/
+├── README.md
+├── 01-frontmatter.md
+├── 02-chapter-one.md
+├── 03-chapter-two.md
+└── images/
+```
+
+## Dependencies
+
+| Format | Required | Notes |
+| --- | --- | --- |
+| EPUB | Python 3.10+ | No extra reader required. |
+| PDF | Poppler: `pdftotext` and `pdfimages` | The PDF needs selectable text. |
+| MOBI | Calibre: `ebook-convert` | `book2md` converts the MOBI to EPUB first. |
+
+`book2md` does not remove DRM. It does not run OCR on scanned PDFs.
+
+## Setup
+
+Clone the repository and install the command:
 
 ```bash
-python -m pip install -e .
+git clone https://github.com/pedrosatin/book2md.git ~/Work/book2md
+python -m pip install ~/Work/book2md
 ```
 
-## Use
+Install the format readers you need:
+
+```bash
+sudo pacman -S poppler          # PDF support on Arch
+sudo pacman -S calibre          # MOBI support on Arch
+```
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt install poppler-utils  # PDF support
+sudo apt install calibre        # MOBI support
+```
+
+Check the installation:
+
+```bash
+command -v book2md
+book2md --help
+```
+
+## Usage
+
+```text
+book2md INPUT [-o OUTPUT]
+```
 
 ```bash
 book2md book.epub
@@ -22,20 +73,26 @@ book2md book.pdf -o notes/book
 book2md book.mobi
 ```
 
-If you omit `-o`, `book2md` writes beside the source file. For example, `book.epub` becomes `book-markdown/`. It stops instead of overwriting an existing directory.
+Without `-o`, `book2md` creates `book-markdown/` beside the source file. It refuses to overwrite an existing output directory.
 
-## Format support
+## Output by format
 
-| Format | What you need | What it writes |
-| --- | --- | --- |
-| EPUB | Python 3.10+ | One Markdown file per item in the book's reading order. Images and internal links stay local. |
-| PDF | Poppler: `pdftotext` and `pdfimages` | A `README.md` containing the extracted text, plus any embedded images. |
-| MOBI | Calibre: `ebook-convert` | Calibre converts the book to EPUB first. `book2md` then writes the EPUB output. |
+**EPUB.** Creates one Markdown file for each item in the EPUB reading order, plus a `README.md` index and an `images/` directory.
 
-PDFs need selectable text. Scanned PDFs need OCR, which this release does not do. The tool does not remove DRM.
+**PDF.** Creates a `README.md` with extracted text and embedded images. Scanned PDFs fail with a clear message because they need OCR.
 
-## Development
+**MOBI.** Uses Calibre to create an EPUB, then uses the EPUB converter. The result has the same structure as EPUB output.
+
+## Known limitations
+
+The EPUB converter handles prose, headings, lists, code blocks, links, and images. Complex tables and publisher-specific XHTML may need cleanup after conversion.
+
+## Tests
 
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## License
+
+MIT
