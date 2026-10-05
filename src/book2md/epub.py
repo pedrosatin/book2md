@@ -173,13 +173,16 @@ def convert_epub(source: Path, output: Path) -> None:
         }
         output.mkdir()
         image_map = {}
+        images_dir = (output / "images").resolve()
         for name in archive.namelist():
             if name.startswith("OEBPS/images/") and not name.endswith("/"):
                 relative = Path(name).relative_to("OEBPS/images")
-                destination = output / "images" / relative
+                destination = (images_dir / relative).resolve()
+                if not destination.is_relative_to(images_dir):
+                    raise ConversionError(f"Insecure image path in EPUB archive: {name}")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_bytes(archive.read(name))
-                image_map[name] = destination.relative_to(output).as_posix()
+                image_map[name] = destination.relative_to(output.resolve()).as_posix()
 
         sections = []
         for document in documents:
