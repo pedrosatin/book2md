@@ -2,6 +2,8 @@
 
 Turn a DRM-free ebook into local Markdown files.
 
+Criado por [@pedrosatin](https://github.com/pedrosatin)
+
 ```bash
 book2md ~/books/book.epub -o ~/notes/book
 ```
@@ -92,6 +94,10 @@ The EPUB converter handles prose, headings, lists, code blocks, links, and image
 ```bash
 python -m unittest discover -s tests -v
 ```
+
+## Contributing
+
+Contributions and bug reports are welcome at https://github.com/pedrosatin/book2md/issues.
 
 ## License
 
