@@ -113,4 +113,39 @@ terminated on timeout; individual output files are limited to 64 MiB and address
 to 1 GiB. Captured output is written to temporary files. These limits do not replace
 a filesystem quota for the total files produced by external converters.
 
+PDF image extraction runs `pdfimages -list` first and refuses PDFs with more than 5,000
+image occurrences or more than 4 GiB of estimated raw image data. Because `pdfimages`
+writes one file per occurrence, extraction also stops when the `images/` directory passes
+about 256 MiB. The size is checked every 0.2 seconds, so a fast writer can go past the cap
+by what it writes in that interval. Byte-identical images are kept only once.
+
+## Markdown safety
+
+Book content is treated as untrusted. In the Markdown output:
+
+- Links keep only `http`, `https`, `mailto`, fragments and relative paths. A link with any
+  other scheme (`javascript:`, `data:`, `file:`) or a protocol-relative URL is removed and
+  its text is kept.
+- Remote, `data:` and otherwise unresolved images are removed. Their alt text stays as
+  plain text. Only images extracted from the EPUB into `images/` are embedded.
+- Raw HTML from the book is not preserved. `\`, `<`, `>`, `[` and `]` in text are escaped,
+  so text such as `[x](javascript:...)` stays text.
+- Code blocks (`<pre>`) keep their text unescaped. A run of three backticks inside one gets
+  a zero-width space so it cannot close the block.
+- Inline code keeps its text unescaped, but backticks inside it become `'`. An inline code
+  element that the book leaves open is closed at the end of its paragraph or block.
+- PDF text is placed in one fenced code block, exactly as `pdftotext -layout` extracts it.
+  The fence is longer than any run of backticks in the text.
+
+## Errors
+
+If a conversion fails, `book2md` removes the output directory it created and prints one
+message. Corrupt archives, encrypted or unsupported archive entries, incomplete package
+metadata and conflicting entry names (for example `images/a` and `images/a/b`) are
+reported this way, without a traceback. Control and escape characters in error messages
+and printed paths are replaced with spaces.
+
+When `convert_epub`, `convert_mobi` or `convert_pdf` is called as a library, the output
+directory must not exist or must be empty. A directory that already holds files is refused.
+
 Run offline tests with `PYTHONPATH=src python3 -m unittest discover -s tests -v`.

@@ -6,6 +6,8 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .errors import ConversionError
+from .markdown import escape_text, quote_target, safe_url
+from .output import prepare_output
 
 MAX_ENTRY_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -61,13 +63,21 @@ class XHTMLToMarkdown(HTMLParser):
         self.output: list[str] = []
         self.skip_depth = 0
         self.pre_depth = 0
+        self.code_depth = 0
         self.list_depth = 0
         self.pending_link = ""
 
     def write(self, text: str) -> None:
         self.output.append(text)
 
+    def close_code(self) -> None:
+        """End an inline code span that the book left open, so escaping resumes."""
+        if self.code_depth:
+            self.write("`")
+            self.code_depth = 0
+
     def blank(self) -> None:
+        self.close_code()
         if not self.output or not self.output[-1].endswith("\n\n"):
             self.write("\n\n")
 
@@ -91,6 +101,7 @@ class XHTMLToMarkdown(HTMLParser):
         elif tag in {"em", "i"}:
             self.write("*")
         elif tag == "code" and not self.pre_depth:
+            self.code_depth += 1
             self.write("`")
         elif tag == "pre":
             self.blank()
@@ -107,24 +118,32 @@ class XHTMLToMarkdown(HTMLParser):
             self.write("> ")
         elif tag == "a":
             href = attributes.get("href")
-            if href:
+            target = self.rewrite_link(href) if href else None
+            if target is not None:
                 self.write("[")
-                self.pending_link = f"]({self.rewrite_link(href)})"
+                self.pending_link = f"]({target})"
         elif tag == "img":
             source = attributes.get("src")
             if source:
                 target = posixpath.normpath(
                     posixpath.join(posixpath.dirname(self.source_path), source)
                 )
-                alt = attributes.get("alt", "") or ""
-                self.write(f"![{alt}]({self.image_map.get(target, source)})")
+                alt = re.sub(r"\s+", " ", attributes.get("alt", "") or "")
+                if target in self.image_map:
+                    self.write(f"![{escape_text(alt)}]({quote_target(self.image_map[target])})")
+                else:
+                    # Remote, data: and unmapped images are never emitted; keep the alt text.
+                    self.write(escape_text(alt))
         elif tag == "hr":
             self.blank()
             self.write("---\n\n")
 
-    def rewrite_link(self, href: str) -> str:
+    def rewrite_link(self, href: str) -> str | None:
+        safe = safe_url(href)
+        if safe is None:
+            return None
         if href.startswith(("http://", "https://", "mailto:")):
-            return href
+            return safe
         target, separator, fragment = href.partition("#")
         resolved = (
             self.source_path
@@ -132,7 +151,8 @@ class XHTMLToMarkdown(HTMLParser):
             else posixpath.normpath(posixpath.join(posixpath.dirname(self.source_path), target))
         )
         rewritten = self.file_map.get(resolved, target)
-        return f"{rewritten}{separator}{fragment}" if separator else rewritten
+        result = f"{rewritten}{separator}{fragment}" if separator else rewritten
+        return quote_target(result)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self.skip_tags:
@@ -148,7 +168,9 @@ class XHTMLToMarkdown(HTMLParser):
         elif tag in {"em", "i"}:
             self.write("*")
         elif tag == "code" and not self.pre_depth:
-            self.write("`")
+            if self.code_depth:
+                self.code_depth -= 1
+                self.write("`")
         elif tag == "pre":
             self.write("\n```\n\n")
             self.pre_depth = max(0, self.pre_depth - 1)
@@ -162,9 +184,18 @@ class XHTMLToMarkdown(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self.skip_depth:
             return
-        self.write(data if self.pre_depth else re.sub(r"\s+", " ", data))
+        if self.pre_depth:
+            self.write(data.replace("```", "``\u200b`"))
+        elif self.code_depth:
+            self.write(re.sub(r"\s+", " ", data).replace("`", "'"))
+        else:
+            self.write(escape_text(re.sub(r"\s+", " ", data)))
 
     def markdown(self) -> str:
+        self.close_code()
+        if self.pre_depth:
+            self.write("\n```\n")
+            self.pre_depth = 0
         text = "".join(self.output)
         text = re.sub(r"[ \t]+\n", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -173,9 +204,18 @@ class XHTMLToMarkdown(HTMLParser):
 
 def convert_epub(source: Path, output: Path) -> None:
     try:
+        convert_archive(source, output)
+    except RuntimeError as error:
+        # zipfile raises RuntimeError for encrypted entries and NotImplementedError
+        # (a subclass) for unsupported compression methods.
+        raise ConversionError(f"The EPUB could not be read: {error}") from error
+
+
+def convert_archive(source: Path, output: Path) -> None:
+    try:
         archive = zipfile.ZipFile(source)
     except zipfile.BadZipFile as error:
-        raise ConversionError(f"{source} is not a valid EPUB archive.") from error
+        raise ConversionError(f"{source.name} is not a valid EPUB archive.") from error
 
     with archive:
         validate_archive(archive)
@@ -196,16 +236,21 @@ def convert_epub(source: Path, output: Path) -> None:
         }
         title = package.findtext("opf:metadata/dc:title", namespaces=ns) or source.stem
         creator = package.findtext("opf:metadata/dc:creator", namespaces=ns)
-        manifest = {
-            item.attrib["id"]: item.attrib
-            for item in package.findall("opf:manifest/opf:item", ns)
-        }
-        opf_dir = posixpath.dirname(rootfile)
-        documents = []
-        for itemref in package.findall("opf:spine/opf:itemref", ns):
-            item = manifest.get(itemref.attrib["idref"])
-            if item and item.get("media-type") in {"application/xhtml+xml", "text/html"}:
-                documents.append(posixpath.normpath(posixpath.join(opf_dir, item["href"])))
+        try:
+            manifest = {
+                item.attrib["id"]: item.attrib
+                for item in package.findall("opf:manifest/opf:item", ns)
+            }
+            opf_dir = posixpath.dirname(rootfile)
+            documents = []
+            for itemref in package.findall("opf:spine/opf:itemref", ns):
+                item = manifest.get(itemref.attrib["idref"])
+                if item and item.get("media-type") in {"application/xhtml+xml", "text/html"}:
+                    documents.append(posixpath.normpath(posixpath.join(opf_dir, item["href"])))
+        except KeyError as error:
+            raise ConversionError(
+                f"The EPUB package has a manifest or spine item without {error}."
+            ) from error
         if not documents:
             raise ConversionError("The EPUB reading order does not contain XHTML documents.")
         if len(documents) > MAX_ENTRIES or len(set(documents)) != len(documents):
@@ -215,7 +260,7 @@ def convert_epub(source: Path, output: Path) -> None:
             document: f"{index:02d}-{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(document).stem).strip('-')}.md"
             for index, document in enumerate(documents, 1)
         }
-        output.mkdir()
+        prepare_output(output)
         image_map = {}
         images_dir = (output / "images").resolve()
         for name in archive.namelist():
@@ -247,9 +292,11 @@ def convert_epub(source: Path, output: Path) -> None:
             )
             sections.append((heading, destination.name))
 
-    readme = [f"# {title}"]
+    title_text = escape_text(re.sub(r"\s+", " ", title))
+    readme = [f"# {title_text}"]
     if creator:
-        readme.extend(["", f"Author: {creator}"])
+        creator_text = escape_text(re.sub(r"\s+", " ", creator))
+        readme.extend(["", f"Author: {creator_text}"])
     readme.extend(["", "## Sections", ""])
     readme.extend(f"- [{heading}]({filename})" for heading, filename in sections)
     (output / "README.md").write_text("\n".join(readme) + "\n", encoding="utf-8")

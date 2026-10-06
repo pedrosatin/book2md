@@ -2,11 +2,17 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
+from pathlib import Path
 
 from .errors import ConversionError
 
 CONVERTER_TIMEOUT = 120
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
+
+
+class _DirectoryLimit(Exception):
+    pass
 
 
 def _limits() -> None:
@@ -18,8 +24,26 @@ def _limits() -> None:
         resource.setrlimit(kind, (limit, limit))
 
 
-def run_converter(command: list[str]) -> subprocess.CompletedProcess:
-    """Bound converter time, captured output and individual files on POSIX."""
+POLL_INTERVAL = 0.2
+
+
+def directory_bytes(directory: Path) -> int:
+    total = 0
+    for entry in os.scandir(directory):
+        try:
+            total += entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            pass
+    return total
+
+
+def run_converter(command: list[str], watch_dir: Path | None = None,
+                  max_dir_bytes: int | None = None) -> subprocess.CompletedProcess:
+    """Bound converter time, captured output and individual files on POSIX.
+
+    With watch_dir and max_dir_bytes, the converter is killed once the files in
+    that directory exceed the cap, bounding the total it can write.
+    """
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         try:
             process = subprocess.Popen(command, stdout=stdout, stderr=stderr,
@@ -28,7 +52,19 @@ def run_converter(command: list[str]) -> subprocess.CompletedProcess:
         except (OSError, subprocess.SubprocessError):
             raise ConversionError("The converter could not start with the configured resource limits.") from None
         try:
-            process.wait(timeout=CONVERTER_TIMEOUT)
+            deadline = time.monotonic() + CONVERTER_TIMEOUT
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, CONVERTER_TIMEOUT)
+                try:
+                    process.wait(timeout=min(POLL_INTERVAL, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    if watch_dir is not None and directory_bytes(watch_dir) > max_dir_bytes:
+                        raise _DirectoryLimit from None
+            if watch_dir is not None and directory_bytes(watch_dir) > max_dir_bytes:
+                raise _DirectoryLimit
         except BaseException as error:
             if os.name == "posix":
                 try:
@@ -38,6 +74,10 @@ def run_converter(command: list[str]) -> subprocess.CompletedProcess:
             else:
                 process.kill()
             process.wait()
+            if isinstance(error, _DirectoryLimit):
+                raise ConversionError(
+                    f"The converter wrote more than {max_dir_bytes // (1024 * 1024)} MiB of files; stopped."
+                ) from None
             if isinstance(error, subprocess.TimeoutExpired):
                 raise ConversionError("The converter exceeded the 120-second time limit.") from error
             raise
