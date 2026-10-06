@@ -1,3 +1,4 @@
+import base64
 import tempfile
 import unittest
 import zipfile
@@ -64,4 +65,3 @@ class EPUBConversionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-import base64
