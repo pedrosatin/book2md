@@ -6,6 +6,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from .errors import ConversionError
+from .markdown import escape_text, quote_target, safe_url
 
 MAX_ENTRY_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -61,6 +62,7 @@ class XHTMLToMarkdown(HTMLParser):
         self.output: list[str] = []
         self.skip_depth = 0
         self.pre_depth = 0
+        self.code_depth = 0
         self.list_depth = 0
         self.pending_link = ""
 
@@ -91,6 +93,7 @@ class XHTMLToMarkdown(HTMLParser):
         elif tag in {"em", "i"}:
             self.write("*")
         elif tag == "code" and not self.pre_depth:
+            self.code_depth += 1
             self.write("`")
         elif tag == "pre":
             self.blank()
@@ -107,24 +110,32 @@ class XHTMLToMarkdown(HTMLParser):
             self.write("> ")
         elif tag == "a":
             href = attributes.get("href")
-            if href:
+            target = self.rewrite_link(href) if href else None
+            if target is not None:
                 self.write("[")
-                self.pending_link = f"]({self.rewrite_link(href)})"
+                self.pending_link = f"]({target})"
         elif tag == "img":
             source = attributes.get("src")
             if source:
                 target = posixpath.normpath(
                     posixpath.join(posixpath.dirname(self.source_path), source)
                 )
-                alt = attributes.get("alt", "") or ""
-                self.write(f"![{alt}]({self.image_map.get(target, source)})")
+                alt = re.sub(r"\s+", " ", attributes.get("alt", "") or "")
+                if target in self.image_map:
+                    self.write(f"![{escape_text(alt)}]({quote_target(self.image_map[target])})")
+                else:
+                    # Remote, data: and unmapped images are never emitted; keep the alt text.
+                    self.write(escape_text(alt))
         elif tag == "hr":
             self.blank()
             self.write("---\n\n")
 
-    def rewrite_link(self, href: str) -> str:
+    def rewrite_link(self, href: str) -> str | None:
+        safe = safe_url(href)
+        if safe is None:
+            return None
         if href.startswith(("http://", "https://", "mailto:")):
-            return href
+            return safe
         target, separator, fragment = href.partition("#")
         resolved = (
             self.source_path
@@ -132,7 +143,8 @@ class XHTMLToMarkdown(HTMLParser):
             else posixpath.normpath(posixpath.join(posixpath.dirname(self.source_path), target))
         )
         rewritten = self.file_map.get(resolved, target)
-        return f"{rewritten}{separator}{fragment}" if separator else rewritten
+        result = f"{rewritten}{separator}{fragment}" if separator else rewritten
+        return quote_target(result)
 
     def handle_endtag(self, tag: str) -> None:
         if tag in self.skip_tags:
@@ -148,6 +160,7 @@ class XHTMLToMarkdown(HTMLParser):
         elif tag in {"em", "i"}:
             self.write("*")
         elif tag == "code" and not self.pre_depth:
+            self.code_depth = max(0, self.code_depth - 1)
             self.write("`")
         elif tag == "pre":
             self.write("\n```\n\n")
@@ -162,7 +175,12 @@ class XHTMLToMarkdown(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self.skip_depth:
             return
-        self.write(data if self.pre_depth else re.sub(r"\s+", " ", data))
+        if self.pre_depth:
+            self.write(data.replace("```", "``\u200b`"))
+        elif self.code_depth:
+            self.write(re.sub(r"\s+", " ", data).replace("`", "'"))
+        else:
+            self.write(escape_text(re.sub(r"\s+", " ", data)))
 
     def markdown(self) -> str:
         text = "".join(self.output)
@@ -175,7 +193,7 @@ def convert_epub(source: Path, output: Path) -> None:
     try:
         archive = zipfile.ZipFile(source)
     except zipfile.BadZipFile as error:
-        raise ConversionError(f"{source} is not a valid EPUB archive.") from error
+        raise ConversionError(f"{source.name} is not a valid EPUB archive.") from error
 
     with archive:
         validate_archive(archive)
@@ -215,7 +233,7 @@ def convert_epub(source: Path, output: Path) -> None:
             document: f"{index:02d}-{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(document).stem).strip('-')}.md"
             for index, document in enumerate(documents, 1)
         }
-        output.mkdir()
+        output.mkdir(exist_ok=True)
         image_map = {}
         images_dir = (output / "images").resolve()
         for name in archive.namelist():
@@ -247,9 +265,11 @@ def convert_epub(source: Path, output: Path) -> None:
             )
             sections.append((heading, destination.name))
 
-    readme = [f"# {title}"]
+    title_text = escape_text(re.sub(r"\s+", " ", title))
+    readme = [f"# {title_text}"]
     if creator:
-        readme.extend(["", f"Author: {creator}"])
+        creator_text = escape_text(re.sub(r"\s+", " ", creator))
+        readme.extend(["", f"Author: {creator_text}"])
     readme.extend(["", "## Sections", ""])
     readme.extend(f"- [{heading}]({filename})" for heading, filename in sections)
     (output / "README.md").write_text("\n".join(readme) + "\n", encoding="utf-8")

@@ -113,4 +113,29 @@ terminated on timeout; individual output files are limited to 64 MiB and address
 to 1 GiB. Captured output is written to temporary files. These limits do not replace
 a filesystem quota for the total files produced by external converters.
 
+PDF image extraction runs `pdfimages -list` first and refuses PDFs with more than 5,000
+image occurrences or more than 4 GiB of estimated raw image data. `pdfimages` writes one
+file per occurrence, so extraction is stopped if the `images/` directory grows past
+256 MiB, and byte-identical images are kept only once.
+
+## Markdown safety
+
+Book content is treated as untrusted. In the Markdown output:
+
+- Links keep only `http`, `https`, `mailto`, fragments and relative paths. A link with any
+  other scheme (`javascript:`, `data:`, `file:`) or a protocol-relative URL is removed and
+  its text is kept.
+- Remote, `data:` and otherwise unresolved images are removed. Their alt text stays as
+  plain text. Only images extracted from the EPUB into `images/` are embedded.
+- Raw HTML from the book is not preserved. `<`, `>`, `[` and `]` in text are escaped, so
+  text such as `[x](javascript:...)` stays text. Code blocks and inline code keep their
+  content as written.
+
+## Errors
+
+If a conversion fails, `book2md` removes the output directory it created and prints one
+message. Corrupt archives and conflicting entry names (for example `images/a` and
+`images/a/b`) are reported this way, without a traceback. Control and escape characters
+in error messages, such as file names taken from the book, are replaced with spaces.
+
 Run offline tests with `PYTHONPATH=src python3 -m unittest discover -s tests -v`.
