@@ -102,3 +102,15 @@ Contributions and bug reports are welcome at https://github.com/pedrosatin/book2
 ## License
 
 MIT
+
+## Conversion limits
+
+EPUB archives are limited to 10,000 unique entries, 256 MiB of declared uncompressed data,
+64 MiB per entry and a compression ratio of 200. Decompression streams enforce the entry
+limit, and metadata rejects DTD/entity declarations and files larger than 2 MiB.
+PDF and MOBI converters have a 120-second deadline. On POSIX, their process groups are
+terminated on timeout; individual output files are limited to 64 MiB and address space
+to 1 GiB. Captured output is written to temporary files. These limits do not replace
+a filesystem quota for the total files produced by external converters.
+
+Run offline tests with `PYTHONPATH=src python3 -m unittest discover -s tests -v`.

@@ -1,8 +1,8 @@
 import shutil
-import subprocess
 from pathlib import Path
 
 from .errors import ConversionError
+from .process import run_converter
 
 
 def require_command(name: str) -> str:
@@ -17,11 +17,7 @@ def require_command(name: str) -> str:
 def convert_pdf(source: Path, output: Path) -> None:
     pdftotext = require_command("pdftotext")
     pdfimages = require_command("pdfimages")
-    text_result = subprocess.run(
-        [pdftotext, "-layout", str(source), "-"],
-        capture_output=True,
-        text=True,
-    )
+    text_result = run_converter([pdftotext, "-layout", str(source), "-"])
     if text_result.returncode:
         raise ConversionError(text_result.stderr.strip() or "pdftotext could not read the PDF.")
     if not text_result.stdout.strip():
@@ -32,11 +28,7 @@ def convert_pdf(source: Path, output: Path) -> None:
     output.mkdir()
     assets = output / "images"
     assets.mkdir()
-    image_result = subprocess.run(
-        [pdfimages, "-all", str(source), str(assets / "page")],
-        capture_output=True,
-        text=True,
-    )
+    image_result = run_converter([pdfimages, "-all", str(source), str(assets / "page")])
     if image_result.returncode:
         raise ConversionError(image_result.stderr.strip() or "pdfimages could not extract images.")
 
@@ -46,4 +38,3 @@ def convert_pdf(source: Path, output: Path) -> None:
         lines.extend(["", "## Extracted images", ""])
         lines.extend(f"![]({image})" for image in image_files)
     (output / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
