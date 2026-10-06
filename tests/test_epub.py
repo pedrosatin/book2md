@@ -1,3 +1,4 @@
+import base64
 import tempfile
 import unittest
 import zipfile
@@ -11,6 +12,7 @@ class EPUBConversionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             epub = root / "book.epub"
+            image = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRxkAAAAASUVORK5CYII=")
             with zipfile.ZipFile(epub, "w") as archive:
                 archive.writestr(
                     "META-INF/container.xml",
@@ -18,19 +20,23 @@ class EPUBConversionTests(unittest.TestCase):
                 )
                 archive.writestr(
                     "content.opf",
-                    """<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test book</dc:title></metadata><manifest><item id="one" href="text/one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="text/two.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>""",
+                    """<package xmlns="http://www.idpf.org/2007/opf"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Test book</dc:title></metadata><manifest><item id="one" href="text/one.xhtml" media-type="application/xhtml+xml"/><item id="two" href="text/two.xhtml" media-type="application/xhtml+xml"/><item id="image" href="OEBPS/images/pixel.png" media-type="image/png"/></manifest><spine><itemref idref="one"/><itemref idref="two"/></spine></package>""",
                 )
                 archive.writestr(
                     "text/one.xhtml",
-                    '<html><body><h1>One</h1><p><a href="two.xhtml">Next</a></p></body></html>',
+                    '<html><body><h1>One</h1><p><a href="two.xhtml">Next</a></p><img src="../OEBPS/images/pixel.png" alt="Pixel"/></body></html>',
                 )
                 archive.writestr(
                     "text/two.xhtml",
                     '<html><body><h1>Two</h1><p>Done.</p></body></html>',
                 )
+                archive.writestr("OEBPS/images/pixel.png", image)
             output = root / "output"
             convert_epub(epub, output)
             self.assertIn("[Next](02-two.md)", (output / "01-one.md").read_text())
+            self.assertIn("![Pixel](images/pixel.png)", (output / "01-one.md").read_text())
+            self.assertEqual((output / "images/pixel.png").read_bytes(), image)
+            self.assertIn("Done.", (output / "02-two.md").read_text())
             self.assertIn("# Test book", (output / "README.md").read_text())
 
     def test_rejects_zip_slip_image_path(self):
@@ -59,4 +65,3 @@ class EPUBConversionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

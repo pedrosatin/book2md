@@ -7,6 +7,47 @@ from xml.etree import ElementTree as ET
 
 from .errors import ConversionError
 
+MAX_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
+MAX_ENTRIES = 10000
+MAX_COMPRESSION_RATIO = 200
+
+
+def validate_archive(archive: zipfile.ZipFile) -> None:
+    entries = archive.infolist()
+    if len(entries) > MAX_ENTRIES or sum(item.file_size for item in entries) > MAX_ARCHIVE_BYTES:
+        raise ConversionError("The EPUB exceeds the archive size or entry-count limit.")
+    names = set()
+    for item in entries:
+        if item.filename in names:
+            raise ConversionError("The EPUB contains duplicate archive entries.")
+        names.add(item.filename)
+        if (item.file_size > MAX_ENTRY_BYTES or
+                item.file_size / max(1, item.compress_size) > MAX_COMPRESSION_RATIO):
+            raise ConversionError("The EPUB contains an oversized or excessively compressed entry.")
+
+
+def read_entry(archive: zipfile.ZipFile, name: str) -> bytes:
+    """Bound decompression independently of the untrusted ZIP metadata."""
+    data = bytearray()
+    with archive.open(name) as entry:
+        while block := entry.read(64 * 1024):
+            if len(data) + len(block) > MAX_ENTRY_BYTES:
+                raise ConversionError("The EPUB entry exceeds the decompression limit.")
+            data.extend(block)
+    return bytes(data)
+
+
+def read_metadata(archive: zipfile.ZipFile, name: str) -> ET.Element:
+    data = read_entry(archive, name)
+    if len(data) > 2 * 1024 * 1024:
+        raise ConversionError("The EPUB metadata exceeds the XML size limit.")
+    # ASCII markup in UTF-16/32 contains NUL bytes between characters.
+    markup = data.replace(b"\x00", b"").upper()
+    if b"<!DOCTYPE" in markup or b"<!ENTITY" in markup:
+        raise ConversionError("The EPUB metadata exceeds the limit or declares XML entities.")
+    return ET.fromstring(data)
+
 
 class XHTMLToMarkdown(HTMLParser):
     block_tags = {"p", "div", "section", "article", "figure", "figcaption", "dl", "dt", "dd"}
@@ -137,14 +178,15 @@ def convert_epub(source: Path, output: Path) -> None:
         raise ConversionError(f"{source} is not a valid EPUB archive.") from error
 
     with archive:
+        validate_archive(archive)
         try:
-            container = ET.fromstring(archive.read("META-INF/container.xml"))
+            container = read_metadata(archive, "META-INF/container.xml")
             rootfile = next(
                 element.attrib["full-path"]
                 for element in container.iter()
                 if element.tag.endswith("rootfile")
             )
-            package = ET.fromstring(archive.read(rootfile))
+            package = read_metadata(archive, rootfile)
         except (KeyError, ET.ParseError, StopIteration) as error:
             raise ConversionError("The EPUB package metadata is missing or malformed.") from error
 
@@ -166,6 +208,8 @@ def convert_epub(source: Path, output: Path) -> None:
                 documents.append(posixpath.normpath(posixpath.join(opf_dir, item["href"])))
         if not documents:
             raise ConversionError("The EPUB reading order does not contain XHTML documents.")
+        if len(documents) > MAX_ENTRIES or len(set(documents)) != len(documents):
+            raise ConversionError("The EPUB reading order repeats documents or exceeds the entry limit.")
 
         file_map = {
             document: f"{index:02d}-{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(document).stem).strip('-')}.md"
@@ -181,13 +225,19 @@ def convert_epub(source: Path, output: Path) -> None:
                 if not destination.is_relative_to(images_dir):
                     raise ConversionError(f"Insecure image path in EPUB archive: {name}")
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(archive.read(name))
+                with archive.open(name) as image, destination.open("wb") as target:
+                    copied = 0
+                    while block := image.read(64 * 1024):
+                        copied += len(block)
+                        if copied > MAX_ENTRY_BYTES:
+                            raise ConversionError("The EPUB image exceeds the decompression limit.")
+                        target.write(block)
                 image_map[name] = destination.relative_to(output.resolve()).as_posix()
 
         sections = []
         for document in documents:
             parser = XHTMLToMarkdown(document, file_map, image_map)
-            parser.feed(archive.read(document).decode("utf-8", errors="replace"))
+            parser.feed(read_entry(archive, document).decode("utf-8", errors="replace"))
             content = parser.markdown()
             destination = output / file_map[document]
             destination.write_text(content, encoding="utf-8")
@@ -203,4 +253,3 @@ def convert_epub(source: Path, output: Path) -> None:
     readme.extend(["", "## Sections", ""])
     readme.extend(f"- [{heading}]({filename})" for heading, filename in sections)
     (output / "README.md").write_text("\n".join(readme) + "\n", encoding="utf-8")
-
