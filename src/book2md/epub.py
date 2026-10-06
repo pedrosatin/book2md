@@ -7,6 +7,7 @@ from xml.etree import ElementTree as ET
 
 from .errors import ConversionError
 from .markdown import escape_text, quote_target, safe_url
+from .output import prepare_output
 
 MAX_ENTRY_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -69,7 +70,14 @@ class XHTMLToMarkdown(HTMLParser):
     def write(self, text: str) -> None:
         self.output.append(text)
 
+    def close_code(self) -> None:
+        """End an inline code span that the book left open, so escaping resumes."""
+        if self.code_depth:
+            self.write("`")
+            self.code_depth = 0
+
     def blank(self) -> None:
+        self.close_code()
         if not self.output or not self.output[-1].endswith("\n\n"):
             self.write("\n\n")
 
@@ -160,8 +168,9 @@ class XHTMLToMarkdown(HTMLParser):
         elif tag in {"em", "i"}:
             self.write("*")
         elif tag == "code" and not self.pre_depth:
-            self.code_depth = max(0, self.code_depth - 1)
-            self.write("`")
+            if self.code_depth:
+                self.code_depth -= 1
+                self.write("`")
         elif tag == "pre":
             self.write("\n```\n\n")
             self.pre_depth = max(0, self.pre_depth - 1)
@@ -183,6 +192,10 @@ class XHTMLToMarkdown(HTMLParser):
             self.write(escape_text(re.sub(r"\s+", " ", data)))
 
     def markdown(self) -> str:
+        self.close_code()
+        if self.pre_depth:
+            self.write("\n```\n")
+            self.pre_depth = 0
         text = "".join(self.output)
         text = re.sub(r"[ \t]+\n", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -190,6 +203,15 @@ class XHTMLToMarkdown(HTMLParser):
 
 
 def convert_epub(source: Path, output: Path) -> None:
+    try:
+        convert_archive(source, output)
+    except RuntimeError as error:
+        # zipfile raises RuntimeError for encrypted entries and NotImplementedError
+        # (a subclass) for unsupported compression methods.
+        raise ConversionError(f"The EPUB could not be read: {error}") from error
+
+
+def convert_archive(source: Path, output: Path) -> None:
     try:
         archive = zipfile.ZipFile(source)
     except zipfile.BadZipFile as error:
@@ -214,16 +236,21 @@ def convert_epub(source: Path, output: Path) -> None:
         }
         title = package.findtext("opf:metadata/dc:title", namespaces=ns) or source.stem
         creator = package.findtext("opf:metadata/dc:creator", namespaces=ns)
-        manifest = {
-            item.attrib["id"]: item.attrib
-            for item in package.findall("opf:manifest/opf:item", ns)
-        }
-        opf_dir = posixpath.dirname(rootfile)
-        documents = []
-        for itemref in package.findall("opf:spine/opf:itemref", ns):
-            item = manifest.get(itemref.attrib["idref"])
-            if item and item.get("media-type") in {"application/xhtml+xml", "text/html"}:
-                documents.append(posixpath.normpath(posixpath.join(opf_dir, item["href"])))
+        try:
+            manifest = {
+                item.attrib["id"]: item.attrib
+                for item in package.findall("opf:manifest/opf:item", ns)
+            }
+            opf_dir = posixpath.dirname(rootfile)
+            documents = []
+            for itemref in package.findall("opf:spine/opf:itemref", ns):
+                item = manifest.get(itemref.attrib["idref"])
+                if item and item.get("media-type") in {"application/xhtml+xml", "text/html"}:
+                    documents.append(posixpath.normpath(posixpath.join(opf_dir, item["href"])))
+        except KeyError as error:
+            raise ConversionError(
+                f"The EPUB package has a manifest or spine item without {error}."
+            ) from error
         if not documents:
             raise ConversionError("The EPUB reading order does not contain XHTML documents.")
         if len(documents) > MAX_ENTRIES or len(set(documents)) != len(documents):
@@ -233,7 +260,7 @@ def convert_epub(source: Path, output: Path) -> None:
             document: f"{index:02d}-{re.sub(r'[^A-Za-z0-9._-]+', '-', Path(document).stem).strip('-')}.md"
             for index, document in enumerate(documents, 1)
         }
-        output.mkdir(exist_ok=True)
+        prepare_output(output)
         image_map = {}
         images_dir = (output / "images").resolve()
         for name in archive.namelist():

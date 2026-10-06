@@ -1,6 +1,6 @@
 import re
 
-_ESCAPES = str.maketrans({"<": "&lt;", ">": "&gt;", "[": "\\[", "]": "\\]"})
+_ESCAPES = str.maketrans({"\\": "\\\\", "<": "&lt;", ">": "&gt;", "[": "\\[", "]": "\\]"})
 _SCHEME = re.compile(r"^([A-Za-z][A-Za-z0-9+.-]*):")
 SAFE_SCHEMES = {"http", "https", "mailto"}
 
@@ -8,6 +8,13 @@ SAFE_SCHEMES = {"http", "https", "mailto"}
 def escape_text(text: str) -> str:
     """Neutralize raw HTML and link syntax in prose coming from a book."""
     return text.translate(_ESCAPES)
+
+
+def fence_block(text: str) -> str:
+    """Wrap text in a backtick fence that no line of the text can close."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}\n{text}\n{fence}"
 
 
 def safe_url(url: str) -> str | None:

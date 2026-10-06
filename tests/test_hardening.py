@@ -14,7 +14,7 @@ from unittest.mock import patch
 from book2md import cli
 from book2md.epub import XHTMLToMarkdown, convert_epub
 from book2md.errors import ConversionError, sanitize
-from book2md.markdown import safe_url
+from book2md.markdown import fence_block, safe_url
 from book2md.pdf import check_image_budget, convert_pdf
 from book2md.process import run_converter
 
@@ -137,6 +137,36 @@ class PDFIntegrationTests(unittest.TestCase):
                 convert_pdf(pdf, output)
 
 
+    def test_pdf_text_is_fenced_and_not_escaped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "repeat.pdf"
+            make_pdf(pdf, 1)
+            output = Path(directory) / "out"
+            text = "Install\n    ./configure [options] list<Drawable> \\[x\\](javascript:alert(1))\n```"
+            fake = type("Result", (), {"returncode": 0, "stdout": text, "stderr": ""})()
+            real_run = run_converter
+
+            def run(command, **kwargs):
+                return fake if "-layout" in command else real_run(command, **kwargs)
+
+            with patch("book2md.pdf.run_converter", side_effect=run):
+                convert_pdf(pdf, output)
+            readme = (output / "README.md").read_text()
+            self.assertIn("\n````\n" + text + "\n````\n", readme)
+            self.assertNotIn("&lt;", readme)
+
+    def test_converter_refuses_non_empty_output_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pdf = Path(directory) / "repeat.pdf"
+            make_pdf(pdf, 1)
+            output = Path(directory) / "out"
+            output.mkdir()
+            (output / "keep").write_text("x")
+            with self.assertRaises(ConversionError):
+                convert_pdf(pdf, output)
+            self.assertEqual([p.name for p in output.iterdir()], ["keep"])
+
+
 class MarkdownSafetyTests(unittest.TestCase):
     def convert(self, body, images=None):
         parser = XHTMLToMarkdown("a.xhtml", {"a.xhtml": "01-a.md", "b.xhtml": "02-b.md"}, images or {})
@@ -179,6 +209,28 @@ class MarkdownSafetyTests(unittest.TestCase):
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", text)
         self.assertIn("\\[x\\]", text)
         self.assertNotIn("bad()", text)
+
+    def test_backslash_cannot_cancel_escapes(self):
+        text = self.convert("<p>\\[x\\](javascript:alert(1))</p>"
+                            '<img src="p.png" alt="a\\"/>', {"p.png": "images/p.png"})
+        self.assertIn("\\\\\\[x\\\\\\](javascript:alert(1))", text)
+        self.assertIn("![a\\\\](images/p.png)", text)
+
+    def test_unclosed_inline_code_is_closed_at_block_boundary(self):
+        text = self.convert("<p><code>foo</p><p>[x](javascript:alert(1)) &lt;img src=x onerror=alert(1)&gt;</p>")
+        self.assertIn("`foo`", text)
+        self.assertIn("\\[x\\](javascript:alert(1))", text)
+        self.assertIn("&lt;img", text)
+        self.assertNotIn("<img", text)
+
+    def test_unclosed_inline_code_is_closed_at_end_of_document(self):
+        text = self.convert("<p>a <code>b")
+        self.assertEqual(text, "a `b`\n")
+        self.assertEqual(self.convert("<p>a</code> b</p>"), "a b\n")
+
+    def test_fence_block_is_longer_than_any_backtick_run(self):
+        self.assertEqual(fence_block("a"), "```\na\n```")
+        self.assertEqual(fence_block("x\n`````\ny"), "``````\nx\n`````\ny\n``````")
 
     def test_code_blocks_keep_angle_brackets_and_cannot_break_out(self):
         text = self.convert("<pre>a &lt; b\n```\n&lt;x&gt;</pre><p><code>1 &lt; 2 `x`</code></p>")
@@ -277,6 +329,48 @@ class CLIFailureTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertNotIn("\x1b", err)
             self.assertNotIn("\x07", err)
+
+    def test_encrypted_entry_is_a_clean_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            epub = Path(directory) / "b.epub"
+            write_epub(epub)
+            output = Path(directory) / "out"
+            with patch("book2md.epub.read_entry", side_effect=RuntimeError("File 'x' is encrypted")):
+                code, err = self.run_cli(str(epub), "-o", str(output))
+            self.assertEqual(code, 1)
+            self.assertIn("encrypted", err)
+            self.assertFalse(output.exists())
+
+    def test_manifest_item_without_href_is_a_clean_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            epub = Path(directory) / "b.epub"
+            with zipfile.ZipFile(epub, "w") as archive:
+                archive.writestr("META-INF/container.xml",
+                                 '<container><rootfiles><rootfile full-path="c.opf"/></rootfiles></container>')
+                archive.writestr("c.opf",
+                                 '<package xmlns="http://www.idpf.org/2007/opf"><manifest>'
+                                 '<item id="one" media-type="application/xhtml+xml"/></manifest>'
+                                 '<spine><itemref idref="one"/></spine></package>')
+            output = Path(directory) / "out"
+            code, err = self.run_cli(str(epub), "-o", str(output))
+            self.assertEqual(code, 1)
+            self.assertIn("href", err)
+            self.assertNotIn("Traceback", err)
+            self.assertFalse(output.exists())
+
+    def test_printed_paths_are_sanitized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            epub = Path(directory) / "b\x1b[2J.epub"
+            write_epub(epub)
+            output = Path(directory) / "o\x1b[31mut"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main([str(epub), "-o", str(output)]), 0)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(cli.main([str(epub), "-o", str(output)]), 2)
+            self.assertNotIn("\x1b", out.getvalue())
+            self.assertNotIn("\x1b", err.getvalue())
 
     def test_sanitize_and_conversion_error(self):
         self.assertEqual(sanitize("a\x1b[31mred\x07\nb\x9bc"), "a [31mred b c")

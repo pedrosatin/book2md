@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         output = Path(f"{output}-markdown")
     output = output.resolve()
     if output.exists():
-        print(f"book2md: output path already exists: {output}", file=sys.stderr)
+        print(f"book2md: output path already exists: {sanitize(output)}", file=sys.stderr)
         return 2
 
     try:
@@ -78,6 +78,6 @@ def main(argv: list[str] | None = None) -> int:
             raise
         print(f"book2md: {message}", file=sys.stderr)
         return 1
-    print(f"Converted {source.name} to {output}")
+    print(f"Converted {sanitize(source.name)} to {sanitize(output)}")
     return 0
 

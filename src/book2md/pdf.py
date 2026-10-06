@@ -3,7 +3,8 @@ import shutil
 from pathlib import Path
 
 from .errors import ConversionError
-from .markdown import escape_text
+from .markdown import escape_text, fence_block
+from .output import prepare_output
 from .process import run_converter
 
 MAX_IMAGES = 5000
@@ -77,7 +78,7 @@ def convert_pdf(source: Path, output: Path) -> None:
         raise ConversionError(listing.stderr.strip() or "pdfimages could not list images.")
     check_image_budget(listing.stdout)
 
-    output.mkdir(exist_ok=True)
+    prepare_output(output)
     assets = output / "images"
     assets.mkdir()
     image_result = run_converter(
@@ -89,7 +90,10 @@ def convert_pdf(source: Path, output: Path) -> None:
     deduplicate(assets)
 
     image_files = sorted(path.relative_to(output).as_posix() for path in assets.iterdir())
-    lines = [f"# {escape_text(source.stem)}", "", escape_text(text_result.stdout.strip())]
+    # The -layout text keeps indentation that Markdown would read as code blocks,
+    # where escapes show up literally. A fence keeps the text as extracted and
+    # stops it from forming links or HTML.
+    lines = [f"# {escape_text(source.stem)}", "", fence_block(text_result.stdout.strip())]
     if image_files:
         lines.extend(["", "## Extracted images", ""])
         lines.extend(f"![]({image})" for image in image_files)
