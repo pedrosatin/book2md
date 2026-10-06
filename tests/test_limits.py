@@ -35,6 +35,12 @@ class ArchiveLimitsTests(unittest.TestCase):
             with patch("book2md.epub.MAX_ENTRY_BYTES", 100), self.assertRaises(ConversionError):
                 read_entry(archive, "text")
 
+    def test_rejects_utf16_xml_entities(self):
+        value = '<!DOCTYPE x [<!ENTITY a "payload">]><x>&a;</x>'.encode("utf-16")
+        with self.archive([("metadata", value)]) as archive:
+            with self.assertRaises(ConversionError):
+                read_metadata(archive, "metadata")
+
     def test_rejects_xml_entities(self):
         with self.archive([("metadata", b'<!DOCTYPE x [<!ENTITY a "payload">]><x>&a;</x>')]) as archive:
             with self.assertRaises(ConversionError):

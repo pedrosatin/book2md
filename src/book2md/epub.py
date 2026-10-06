@@ -40,7 +40,11 @@ def read_entry(archive: zipfile.ZipFile, name: str) -> bytes:
 
 def read_metadata(archive: zipfile.ZipFile, name: str) -> ET.Element:
     data = read_entry(archive, name)
-    if len(data) > 2 * 1024 * 1024 or b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
+    if len(data) > 2 * 1024 * 1024:
+        raise ConversionError("The EPUB metadata exceeds the XML size limit.")
+    # ASCII markup in UTF-16/32 contains NUL bytes between characters.
+    markup = data.replace(b"\x00", b"").upper()
+    if b"<!DOCTYPE" in markup or b"<!ENTITY" in markup:
         raise ConversionError("The EPUB metadata exceeds the limit or declares XML entities.")
     return ET.fromstring(data)
 
