@@ -11,16 +11,22 @@ MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 def _limits() -> None:
     import resource
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_OUTPUT_BYTES, MAX_OUTPUT_BYTES))
-    resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+    for kind, cap in ((resource.RLIMIT_FSIZE, MAX_OUTPUT_BYTES),
+                      (resource.RLIMIT_AS, 1024 * 1024 * 1024)):
+        inherited = resource.getrlimit(kind)
+        limit = min([cap, *(value for value in inherited if value != resource.RLIM_INFINITY)])
+        resource.setrlimit(kind, (limit, limit))
 
 
 def run_converter(command: list[str]) -> subprocess.CompletedProcess:
     """Bound converter time, captured output and individual files on POSIX."""
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
-        process = subprocess.Popen(command, stdout=stdout, stderr=stderr,
-                                   start_new_session=os.name == "posix",
-                                   preexec_fn=_limits if os.name == "posix" else None)
+        try:
+            process = subprocess.Popen(command, stdout=stdout, stderr=stderr,
+                                       start_new_session=os.name == "posix",
+                                       preexec_fn=_limits if os.name == "posix" else None)
+        except (OSError, subprocess.SubprocessError):
+            raise ConversionError("The converter could not start with the configured resource limits.") from None
         try:
             process.wait(timeout=CONVERTER_TIMEOUT)
         except BaseException as error:
